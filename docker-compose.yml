@@ -1,0 +1,372 @@
+# GrainShield Platform — Local Development Orchestration
+# All 7 microservices + PostgreSQL + Redis + Kafka + Kafka UI
+# Run: docker-compose up -d
+
+version: "3.9"
+
+services:
+  # ─── Infrastructure ──────────────────────────────────────────────────────
+
+  postgres:
+    image: postgres:16.2-alpine3.19
+    container_name: gs-postgres
+    environment:
+      POSTGRES_DB: grainshield
+      POSTGRES_USER: grainshield
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+      GS_FARMER_DB_PASSWORD: ${GS_FARMER_DB_PASSWORD:?GS_FARMER_DB_PASSWORD must be set in .env}
+      GS_POLICY_DB_PASSWORD: ${GS_POLICY_DB_PASSWORD:?GS_POLICY_DB_PASSWORD must be set in .env}
+      GS_PAYMENT_DB_PASSWORD: ${GS_PAYMENT_DB_PASSWORD:?GS_PAYMENT_DB_PASSWORD must be set in .env}
+      GS_PRICE_DB_PASSWORD: ${GS_PRICE_DB_PASSWORD:?GS_PRICE_DB_PASSWORD must be set in .env}
+      GS_RISK_DB_PASSWORD: ${GS_RISK_DB_PASSWORD:?GS_RISK_DB_PASSWORD must be set in .env}
+      GS_WAREHOUSE_DB_PASSWORD: ${GS_WAREHOUSE_DB_PASSWORD:?GS_WAREHOUSE_DB_PASSWORD must be set in .env}
+      GS_NOTIFICATION_DB_PASSWORD: ${GS_NOTIFICATION_DB_PASSWORD:?GS_NOTIFICATION_DB_PASSWORD must be set in .env}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Single init script that runs all migrations then creates service roles
+      - ./infrastructure/postgres/init-all.sh:/docker-entrypoint-initdb.d/01-init-all.sh
+      # Mount migration directories where the init script expects them
+      - ./services/farmer-service/migrations:/migrations/farmer-service
+      - ./services/policy-service/migrations:/migrations/policy-service
+      - ./services/payment-service/migrations:/migrations/payment-service
+      - ./services/price-service/migrations:/migrations/price-service
+      - ./services/risk-service/migrations:/migrations/risk-service
+      - ./services/warehouse-service/migrations:/migrations/warehouse-service
+      - ./services/notification-service/migrations:/migrations/notification-service
+      # Service-role SQL used by init-all.sh
+      - ./infrastructure/postgres/init-service-roles.sql:/migrations/init-service-roles.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U grainshield"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7.2.4-alpine3.19
+    container_name: gs-redis
+    ports:
+      - "127.0.0.1:6379:6379"
+    command: >-
+      redis-server
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}
+      --rename-command FLUSHALL ""
+      --rename-command FLUSHDB ""
+      --rename-command DEBUG ""
+      --rename-command CONFIG ""
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ─── Kafka Event Backbone ────────────────────────────────────────────────
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    container_name: gs-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+      KAFKA_OPTS: "-Dzookeeper.4lw.commands.whitelist=ruok,srvr,stat"
+    # No external port exposure — Zookeeper is internal-only
+    healthcheck:
+      test: ["CMD-SHELL", "echo ruok | nc localhost 2181 | grep imok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: gs-kafka
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      # Internal broker port: no external exposure (services connect via Docker network)
+      # External listener: localhost-only for dev tools
+      - "127.0.0.1:29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      # Internal listener for service-to-broker traffic inside Docker network
+      # External listener for host-machine access (local dev tools, scripts)
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:29092
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_LOG_RETENTION_HOURS: 168
+      KAFKA_LOG_RETENTION_BYTES: 1073741824
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  # One-shot container that creates all required topics then exits
+  kafka-init-topics:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: gs-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "Creating GrainShield Kafka topics..."
+
+        # Policy domain
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists \
+          --topic grainshield.policy.insurance.triggered \
+          --partitions 3 --replication-factor 1
+
+        # Payment domain
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists \
+          --topic grainshield.payment.disbursement.completed \
+          --partitions 3 --replication-factor 1
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists \
+          --topic grainshield.payment.disbursement.failed \
+          --partitions 3 --replication-factor 1
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists \
+          --topic grainshield.payment.disbursement.dlq \
+          --partitions 1 --replication-factor 1
+
+        # Risk domain
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists \
+          --topic grainshield.risk.score.updated \
+          --partitions 3 --replication-factor 1
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists \
+          --topic grainshield.risk.weather.confirmed \
+          --partitions 3 --replication-factor 1
+
+        # Intelligence (price) domain
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists \
+          --topic grainshield.intelligence.price.updated \
+          --partitions 3 --replication-factor 1
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists \
+          --topic grainshield.intelligence.price.sms_generated \
+          --partitions 3 --replication-factor 1
+
+        echo "All 8 topics created successfully."
+        kafka-topics --bootstrap-server kafka:9092 --list
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:v0.7.2
+    container_name: gs-kafka-ui
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:9080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: grainshield-local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+    restart: unless-stopped
+
+  # ─── Microservices ───────────────────────────────────────────────────────
+
+  farmer-service:
+    build:
+      context: .
+      dockerfile: services/farmer-service/Dockerfile
+    container_name: gs-farmer
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: "8080"
+      DATABASE_URL: postgres://gs_farmer:${GS_FARMER_DB_PASSWORD:?GS_FARMER_DB_PASSWORD must be set in .env}@postgres:5432/grainshield?sslmode=disable
+      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}@redis:6379/0
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-}
+      KAFKA_BROKERS: kafka:9092
+      LOG_LEVEL: info
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+
+  policy-service:
+    build:
+      context: .
+      dockerfile: services/policy-service/Dockerfile
+    container_name: gs-policy
+    ports:
+      - "8081:8081"
+    environment:
+      PORT: "8081"
+      DATABASE_URL: postgres://gs_policy:${GS_POLICY_DB_PASSWORD:?GS_POLICY_DB_PASSWORD must be set in .env}@postgres:5432/grainshield?sslmode=disable
+      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}@redis:6379/1
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
+      KAFKA_BROKERS: kafka:9092
+      RISK_SERVICE_URL: http://risk-service:8084
+      PRICE_SERVICE_URL: http://price-service:8083
+      PAYMENT_SERVICE_URL: http://payment-service:8082
+      LOG_LEVEL: info
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+
+  payment-service:
+    build:
+      context: .
+      dockerfile: services/payment-service/Dockerfile
+    container_name: gs-payment
+    ports:
+      - "8082:8082"
+    environment:
+      PORT: "8082"
+      DATABASE_URL: postgres://gs_payment:${GS_PAYMENT_DB_PASSWORD:?GS_PAYMENT_DB_PASSWORD must be set in .env}@postgres:5432/grainshield?sslmode=disable
+      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}@redis:6379/2
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
+      KAFKA_BROKERS: kafka:9092
+      LOG_LEVEL: info
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+
+  price-service:
+    build:
+      context: .
+      dockerfile: services/price-service/Dockerfile
+    container_name: gs-price
+    ports:
+      - "8083:8083"
+    environment:
+      PORT: "8083"
+      DATABASE_URL: postgres://gs_price:${GS_PRICE_DB_PASSWORD:?GS_PRICE_DB_PASSWORD must be set in .env}@postgres:5432/grainshield?sslmode=disable
+      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}@redis:6379/3
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
+      KAFKA_BROKERS: kafka:9092
+      LOG_LEVEL: info
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+
+  risk-service:
+    build:
+      context: .
+      dockerfile: services/risk-service/Dockerfile
+    container_name: gs-risk
+    ports:
+      - "8084:8084"
+    environment:
+      PORT: "8084"
+      DATABASE_URL: postgres://gs_risk:${GS_RISK_DB_PASSWORD:?GS_RISK_DB_PASSWORD must be set in .env}@postgres:5432/grainshield?sslmode=disable
+      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}@redis:6379/4
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
+      KAFKA_BROKERS: kafka:9092
+      LOG_LEVEL: info
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+
+  warehouse-service:
+    build:
+      context: .
+      dockerfile: services/warehouse-service/Dockerfile
+    container_name: gs-warehouse
+    ports:
+      - "8085:8085"
+    environment:
+      PORT: "8085"
+      DATABASE_URL: postgres://gs_warehouse:${GS_WAREHOUSE_DB_PASSWORD:?GS_WAREHOUSE_DB_PASSWORD must be set in .env}@postgres:5432/grainshield?sslmode=disable
+      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}@redis:6379/5
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
+      KAFKA_BROKERS: kafka:9092
+      LOG_LEVEL: info
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+
+  notification-service:
+    build:
+      context: .
+      dockerfile: services/notification-service/Dockerfile
+    container_name: gs-notification
+    ports:
+      - "8086:8086"
+    environment:
+      PORT: "8086"
+      DATABASE_URL: postgres://gs_notification:${GS_NOTIFICATION_DB_PASSWORD:?GS_NOTIFICATION_DB_PASSWORD must be set in .env}@postgres:5432/grainshield?sslmode=disable
+      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}@redis:6379/6
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
+      KAFKA_BROKERS: kafka:9092
+      LOG_LEVEL: info
+      AT_API_KEY: ${AT_API_KEY}
+      AT_USERNAME: ${AT_USERNAME}
+      AT_ENVIRONMENT: ${AT_ENVIRONMENT:-sandbox}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+
+  ussd-service:
+    build:
+      context: .
+      dockerfile: services/ussd-service/Dockerfile
+    container_name: gs-ussd
+    ports:
+      - "8087:8087"
+    environment:
+      PORT: "8087"
+      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}@redis:6379/7
+      FARMER_SERVICE_URL: http://farmer-service:8080
+      POLICY_SERVICE_URL: http://policy-service:8081
+      PRICE_SERVICE_URL: http://price-service:8083
+      AT_ENVIRONMENT: ${AT_ENVIRONMENT:-sandbox}
+      LOG_LEVEL: info
+    depends_on:
+      redis:
+        condition: service_healthy
+      farmer-service:
+        condition: service_started
+      policy-service:
+        condition: service_started
+      price-service:
+        condition: service_started
+    restart: unless-stopped
+
+
+volumes:
+  postgres_data:

@@ -1,0 +1,25 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: ml-inference-alerts
+  namespace: grainshield-prod
+spec:
+  groups:
+  - name: ml-inference-auto-rollback
+    rules:
+    - alert: MlInferenceHighErrorRate
+      expr: sum(rate(http_requests_total{app="ml-inference", status=~"5.."}[5m])) / sum(rate(http_requests_total{app="ml-inference"}[5m])) > 0.01
+      for: 2m
+      labels:
+        severity: critical
+        action: auto-rollback
+      annotations:
+        summary: "Error rate > 1% triggering auto-rollback"
+    - alert: MlInferenceHighLatency
+      expr: histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{app="ml-inference"}[5m])) by (le)) > (2 * 1.500) # Assuming slower 1.5s baseline for ML
+      for: 2m
+      labels:
+        severity: critical
+        action: auto-rollback
+      annotations:
+        summary: "p95 latency > 2x ML SLO baseline"

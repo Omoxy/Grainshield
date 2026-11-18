@@ -1,0 +1,121 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: policy-service
+  namespace: grainshield-prod
+  labels:
+    app: policy-service
+    tier: backend
+    region: af-south-1
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: policy-service
+  strategy:
+    canary:
+      steps:
+      - setWeight: 10
+      - pause: {duration: 30m}
+      - setWeight: 50
+      - pause: {duration: 30m}
+  template:
+    metadata:
+      labels:
+        app: policy-service
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8081"
+    spec:
+      nodeSelector:
+        node-pool: services  # t3.medium nodes
+      containers:
+      - name: policy-service
+        image: grainshield/policy-service:v1.0.0
+        ports:
+        - containerPort: 8081
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "512Mi"
+          limits:
+            cpu: "1000m"
+            memory: "1Gi"
+        envFrom:
+        # No plain-text secrets; using SealedSecrets or AWS Secrets Manager reference
+        - secretRef:
+            name: policy-service-sealed-secrets
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8081
+          initialDelaySeconds: 15
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8081
+          initialDelaySeconds: 5
+          periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: policy-service
+  namespace: grainshield-prod
+  labels:
+    app: policy-service
+spec:
+  selector:
+    app: policy-service
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 8081
+
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: policy-service-ingress
+  namespace: grainshield-prod
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  ingressClassName: nginx
+  tls:
+  - hosts:
+    - policy-service.gs-prod.com
+    secretName: policy-service-tls-secret
+  rules:
+  - host: policy-service.gs-prod.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: policy-service
+            port:
+              number: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: policy-service-soc2-access-control
+  namespace: grainshield-prod
+spec:
+  podSelector:
+    matchLabels:
+      app: policy-service
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ingress-nginx
+    ports:
+    - protocol: TCP
+      port: 80

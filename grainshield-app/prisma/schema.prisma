@@ -1,0 +1,1077 @@
+// GrainShield V3 — Farm Cashflow Resilience Platform
+// Database schema for Prisma ORM
+//
+// Covers: Identity & KYC, Farmer Profiles, Warehouse Receipts,
+// Storage Records, Claims, Loans, Alerts, Prices, Audit Logs
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ─────────────────────────────────────────────
+// IDENTITY & AUTH
+// ─────────────────────────────────────────────
+
+enum AccountStatus {
+  PENDING_REGISTRATION
+  EMAIL_VERIFIED
+  PENDING_KYC
+  KYC_IN_REVIEW
+  APPROVED
+  REJECTED
+  SUSPENDED
+}
+
+enum UserRole {
+  FARMER
+  ADMIN
+  SUPER_ADMIN
+}
+
+model User {
+  id            String        @id @default(cuid())
+  fullName      String
+  email         String        @unique
+  phone         String        @unique
+  passwordHash  String
+  role          UserRole      @default(FARMER)
+  accountStatus AccountStatus @default(PENDING_REGISTRATION)
+
+  // USSD registration fields
+  ussdRegistered Boolean @default(false)
+  ussdPin        String? // Hashed 4-digit PIN for USSD access
+
+  emailVerifiedAt DateTime?
+  lastLoginAt     DateTime?
+  lastLoginIp     String?
+  loginAttempts   Int       @default(0)
+  lockedUntil     DateTime?
+  passwordChangedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  deletedAt DateTime?
+
+  // Relations
+  farmerProfile    FarmerProfile?
+  kycDocuments     KycDocument[]
+  warehouseReceipts WarehouseReceipt[]
+  claims           Claim[]
+  loans            Loan[]
+  alerts           Alert[]
+  otpTokens        OtpToken[]
+  sessions         Session[]
+  auditLogsAsActor AuditLog[]        @relation("AuditActor")
+  auditLogsAsTarget AuditLog[]       @relation("AuditTarget")
+
+  @@index([accountStatus])
+  @@index([role])
+  @@index([phone])
+  @@index([deletedAt])
+  @@map("users")
+}
+
+// ─────────────────────────────────────────────
+// SESSIONS & REFRESH TOKENS
+// ─────────────────────────────────────────────
+
+model Session {
+  id            String   @id @default(cuid())
+  userId        String
+  refreshToken  String   @unique
+  jti           String   @unique
+  deviceInfo    String?
+  ipAddress     String?
+  userAgent     String?
+  expiresAt     DateTime
+  revokedAt     DateTime?
+  revokeReason  String?
+  lastActiveAt  DateTime @default(now())
+  createdAt     DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@index([revokedAt])
+  @@map("sessions")
+}
+
+// ─────────────────────────────────────────────
+// LOGIN HISTORY
+// ─────────────────────────────────────────────
+
+enum LoginResult {
+  SUCCESS
+  INVALID_CREDENTIALS
+  ACCOUNT_LOCKED
+  ACCOUNT_SUSPENDED
+  RATE_LIMITED
+}
+
+model LoginAttempt {
+  id         String      @id @default(cuid())
+  identifier String
+  ipAddress  String
+  userAgent  String?
+  result     LoginResult
+  userId     String?
+  failReason String?
+  createdAt  DateTime    @default(now())
+
+  @@index([identifier, createdAt])
+  @@index([ipAddress, createdAt])
+  @@index([userId, createdAt])
+  @@map("login_attempts")
+}
+
+// ─────────────────────────────────────────────
+// OTP VERIFICATION
+// ─────────────────────────────────────────────
+
+model OtpToken {
+  id        String   @id @default(cuid())
+  userId    String
+  code      String   // Hashed 6-digit OTP
+  channel   String   @default("sms") // "sms" | "email"
+  expiresAt DateTime
+  usedAt    DateTime?
+  attempts  Int      @default(0)
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+  @@map("otp_tokens")
+}
+
+// ─────────────────────────────────────────────
+// KYC DOCUMENTS
+// ─────────────────────────────────────────────
+
+enum KycDocumentType {
+  NATIONAL_ID
+  SELFIE
+  PROOF_OF_RESIDENCE
+  KRA_PIN
+}
+
+enum KycDocumentStatus {
+  PENDING_REVIEW
+  VERIFIED
+  REJECTED
+}
+
+model KycDocument {
+  id         String            @id @default(cuid())
+  userId     String
+  type       KycDocumentType
+  status     KycDocumentStatus @default(PENDING_REVIEW)
+  fileUrl    String            // S3/object storage path
+  fileName   String
+  fileSize   Int               // bytes
+  mimeType   String
+  sha256Hash String?
+  scanStatus String            @default("pending") // "pending" | "clean" | "infected" | "error"
+  metadataStripped Boolean     @default(false)
+  reviewedBy String?           // Admin user ID
+  reviewNote String?
+  reviewedAt DateTime?
+  rejectionCount Int           @default(0)
+  uploadedAt DateTime          @default(now())
+  updatedAt  DateTime          @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  reviewHistory KycReviewHistory[]
+
+  @@unique([userId, type])
+  @@index([status])
+  @@index([sha256Hash])
+  @@map("kyc_documents")
+}
+
+model KycReviewHistory {
+  id           String   @id @default(cuid())
+  documentId   String
+  reviewerId   String
+  reviewerRole String
+  action       String   // "approve" | "reject" | "escalate"
+  note         String?
+  ipAddress    String?
+  createdAt    DateTime @default(now())
+
+  document KycDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@index([documentId, createdAt])
+  @@index([reviewerId])
+  @@map("kyc_review_history")
+}
+
+// ─────────────────────────────────────────────
+// FARMER PROFILES
+// ─────────────────────────────────────────────
+
+model FarmerProfile {
+  id                String  @id @default(cuid())
+  userId            String  @unique
+  county            String
+  ward              String
+  village           String?
+  farmingExperience String? // e.g. "5+ years"
+  primaryCrop       String  @default("Maize")
+  farmSizeHa        Float?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([county, ward])
+  @@map("farmer_profiles")
+}
+
+// ─────────────────────────────────────────────
+// WAREHOUSES
+// ─────────────────────────────────────────────
+
+enum WarehouseStatus {
+  OPERATIONAL
+  WARNING
+  OFFLINE
+  MAINTENANCE
+}
+
+model Warehouse {
+  id            String          @id @default(cuid())
+  code          String          @unique // e.g. "WH-001"
+  name          String
+  location      String
+  county        String
+  capacityKg    Int
+  status        WarehouseStatus @default(OPERATIONAL)
+  lastInspection DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  receipts      WarehouseReceipt[]
+  sensorReadings SensorReading[]
+  riskFlags     WarehouseRiskFlag[]
+
+  @@index([county])
+  @@index([status])
+  @@map("warehouses")
+}
+
+model SensorReading {
+  id          String   @id @default(cuid())
+  warehouseId String
+  temperatureC Float
+  humidityPct  Float
+  moisturePct  Float?
+  co2Ppm      Float?
+  recordedAt  DateTime @default(now())
+
+  warehouse Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+
+  @@index([warehouseId, recordedAt])
+  @@map("sensor_readings")
+}
+
+model WarehouseRiskFlag {
+  id          String   @id @default(cuid())
+  warehouseId String
+  flag        String   // e.g. "Elevated humidity", "No sensor data"
+  severity    String   @default("medium") // "low" | "medium" | "high"
+  resolvedAt  DateTime?
+  createdAt   DateTime @default(now())
+
+  warehouse Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+
+  @@index([warehouseId])
+  @@map("warehouse_risk_flags")
+}
+
+// ─────────────────────────────────────────────
+// WAREHOUSE RECEIPTS
+// ─────────────────────────────────────────────
+
+enum GrainGrade {
+  A
+  B
+  C
+}
+
+enum ReceiptHealthStatus {
+  SAFE
+  CAUTION
+  RISK
+}
+
+model WarehouseReceipt {
+  id            String              @id @default(cuid())
+  receiptCode   String              @unique // e.g. "WR-2025-0041"
+  userId        String
+  warehouseId   String
+  grainType     String              @default("Maize")
+  quantityKg    Float
+  grade         GrainGrade          @default(B)
+  healthStatus  ReceiptHealthStatus @default(SAFE)
+  healthLabel   String?
+  depositDate   DateTime
+  estimatedValueKsh Float?
+
+  // Latest conditions snapshot
+  temperatureC  Float?
+  humidityPct   Float?
+  moisturePct   Float?
+
+  version   Int      @default(1)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  deletedAt DateTime?
+
+  // Relations
+  user      User      @relation(fields: [userId], references: [id])
+  warehouse Warehouse @relation(fields: [warehouseId], references: [id])
+  claims    Claim[]
+  loans     Loan[]
+
+  @@index([userId])
+  @@index([warehouseId])
+  @@index([healthStatus])
+  @@index([deletedAt])
+  @@map("warehouse_receipts")
+}
+
+// ─────────────────────────────────────────────
+// CLAIMS
+// ─────────────────────────────────────────────
+
+enum ClaimCategory {
+  STORAGE_SPOILAGE
+  MOISTURE_DAMAGE
+  CONTAMINATION
+  PEST_DAMAGE
+  WAREHOUSE_HANDLING
+  WEATHER_HARVEST
+}
+
+enum ClaimStatus {
+  SUBMITTED
+  IN_REVIEW
+  APPROVED
+  REJECTED
+  PAID
+}
+
+enum FraudScore {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+model Claim {
+  id                  String        @id @default(cuid())
+  claimCode           String        @unique // e.g. "CLM-2025-0089"
+  userId              String
+  warehouseReceiptId  String
+  category            ClaimCategory
+  status              ClaimStatus   @default(SUBMITTED)
+  description         String
+  amountClaimedKsh    Float
+  amountApprovedKsh   Float?
+  fraudScore          FraudScore    @default(LOW)
+  fraudNotes          String?
+  fraudConfidence     Float?
+  duplicateOfId       String?
+  escalated           Boolean       @default(false)
+  escalatedAt         DateTime?
+  escalatedReason     String?
+
+  // Correlation fields for fraud detection
+  eventDate           DateTime?
+  eventLocation       String?
+  weatherCorrelation  String?
+  timelineValid       Boolean?
+
+  // Review
+  reviewedBy          String?       // Admin user ID
+  reviewNote          String?
+  reviewedAt          DateTime?
+  version             Int           @default(1)
+
+  // Payout
+  paidAt              DateTime?
+  paymentMethod       String?       // e.g. "M-Pesa"
+  paymentRef          String?
+
+  dateSubmitted       DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+
+  // Relations
+  user              User              @relation(fields: [userId], references: [id])
+  warehouseReceipt  WarehouseReceipt  @relation(fields: [warehouseReceiptId], references: [id])
+  evidence          ClaimEvidence[]
+  statusHistory     ClaimStatusChange[]
+
+  @@index([userId])
+  @@index([status])
+  @@index([fraudScore])
+  @@index([dateSubmitted])
+  @@index([duplicateOfId])
+  @@index([escalated])
+  @@map("claims")
+}
+
+model ClaimStatusChange {
+  id           String   @id @default(cuid())
+  claimId      String
+  fromStatus   String
+  toStatus     String
+  changedBy    String
+  changedByRole String
+  reason       String?
+  ipAddress    String?
+  createdAt    DateTime @default(now())
+
+  claim Claim @relation(fields: [claimId], references: [id], onDelete: Cascade)
+
+  @@index([claimId, createdAt])
+  @@map("claim_status_changes")
+}
+
+model ClaimEvidence {
+  id       String @id @default(cuid())
+  claimId  String
+  fileUrl  String
+  fileName String
+  fileSize Int
+  mimeType String
+  uploadedAt DateTime @default(now())
+
+  claim Claim @relation(fields: [claimId], references: [id], onDelete: Cascade)
+
+  @@index([claimId])
+  @@map("claim_evidence")
+}
+
+// ─────────────────────────────────────────────
+// LOANS (Warehouse Receipt Finance)
+// ─────────────────────────────────────────────
+
+enum LoanStatus {
+  PENDING_APPROVAL
+  APPROVED
+  DISBURSED
+  ACTIVE
+  REPAID
+  DEFAULTED
+}
+
+model Loan {
+  id                   String     @id @default(cuid())
+  loanCode             String     @unique // e.g. "LN-2025-0018"
+  userId               String
+  warehouseReceiptId   String
+  amountKsh            Float
+  interestRatePercent  Float      @default(14)
+  tenureDays           Int
+  status               LoanStatus @default(PENDING_APPROVAL)
+  purpose              String?
+
+  disbursedAt          DateTime?
+  disbursementMethod   String?   // "M-Pesa"
+  disbursementRef      String?
+  dueDate              DateTime?
+
+  // Repayment tracking
+  totalRepaidKsh       Float     @default(0)
+  lastRepaymentAt      DateTime?
+
+  // Approval
+  approvedBy           String?   // Admin user ID
+  approvedAt           DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  user              User              @relation(fields: [userId], references: [id])
+  warehouseReceipt  WarehouseReceipt  @relation(fields: [warehouseReceiptId], references: [id])
+  repayments        LoanRepayment[]
+
+  @@index([userId])
+  @@index([status])
+  @@index([dueDate])
+  @@map("loans")
+}
+
+model LoanRepayment {
+  id          String   @id @default(cuid())
+  loanId      String
+  amountKsh   Float
+  method      String   // "M-Pesa", "Bank Transfer"
+  reference   String?  // M-Pesa transaction ref
+  receivedAt  DateTime @default(now())
+
+  loan Loan @relation(fields: [loanId], references: [id], onDelete: Cascade)
+
+  @@index([loanId])
+  @@map("loan_repayments")
+}
+
+// ─────────────────────────────────────────────
+// ALERTS & NOTIFICATIONS
+// ─────────────────────────────────────────────
+
+enum AlertCategory {
+  WEATHER
+  STORAGE
+  PRICE
+  CLAIMS
+  SYSTEM
+  LOAN
+}
+
+enum AlertSeverity {
+  INFO
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+model Alert {
+  id        String        @id @default(cuid())
+  userId    String?       // null for system-wide alerts
+  category  AlertCategory
+  severity  AlertSeverity @default(INFO)
+  title     String
+  message   String
+  read      Boolean       @default(false)
+  readAt    DateTime?
+
+  // Delivery tracking
+  smsDelivered   Boolean @default(false)
+  ussdDelivered  Boolean @default(false)
+  webDelivered   Boolean @default(false)
+
+  createdAt DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, read])
+  @@index([category])
+  @@index([createdAt])
+  @@map("alerts")
+}
+
+// ─────────────────────────────────────────────
+// PRICE DATA
+// ─────────────────────────────────────────────
+
+model MarketPrice {
+  id          String   @id @default(cuid())
+  source      String   // e.g. "NCPB Official", "Eldoret Market"
+  market      String   // Market name
+  grainType   String   @default("Maize")
+  pricePerKg  Float
+  currency    String   @default("KSh")
+  recordedAt  DateTime @default(now())
+
+  @@index([market, recordedAt])
+  @@index([grainType])
+  @@map("market_prices")
+}
+
+model PriceAlertThreshold {
+  id            String  @id @default(cuid())
+  metric        String  // e.g. "Price Drop > 5% in 24h"
+  enabled       Boolean @default(true)
+  thresholdValue Float?
+  lastTriggered DateTime?
+  createdBy     String? // Admin user ID
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@map("price_alert_thresholds")
+}
+
+// ─────────────────────────────────────────────
+// AUDIT LOG
+// ─────────────────────────────────────────────
+
+enum AuditSeverity {
+  INFO
+  WARNING
+  CRITICAL
+}
+
+enum AuditCategory {
+  AUTH
+  KYC
+  CLAIMS
+  LOANS
+  STORAGE
+  WAREHOUSE
+  PAYOUT
+  RISK
+  ROLES
+  PERMISSIONS
+  SYSTEM
+  ADMIN
+}
+
+model AuditLog {
+  id             String        @id @default(cuid())
+  actorId        String?
+  actorRole      String
+  action         String
+  actionType     String        // "create" | "update" | "delete" | "approve" | "reject" | "login" | "logout" | "escalate"
+  category       AuditCategory
+  severity       AuditSeverity @default(INFO)
+  targetId       String?
+  targetType     String?       // "user" | "claim" | "kyc_document" | "warehouse" | "loan" | "payout" | "role"
+  targetLabel    String?
+  previousState  String?       // JSON snapshot of the entity before the change
+  newState       String?       // JSON snapshot of the entity after the change
+  details        String?
+  ipAddress      String?
+  userAgent      String?
+  requestId      String?       // Correlation ID for request tracing
+  createdAt      DateTime      @default(now())
+
+  actor  User? @relation("AuditActor", fields: [actorId], references: [id])
+  target User? @relation("AuditTarget", fields: [targetId], references: [id])
+
+  @@index([actorId])
+  @@index([category])
+  @@index([severity])
+  @@index([createdAt])
+  @@index([targetId, targetType])
+  @@index([actionType])
+  @@index([requestId])
+  @@map("audit_logs")
+}
+
+// ─────────────────────────────────────────────
+// GRANULAR PERMISSIONS
+// ─────────────────────────────────────────────
+
+model Permission {
+  id          String   @id @default(cuid())
+  role        UserRole
+  resource    String   // "claims" | "kyc" | "warehouses" | "loans" | "farmers" | "audit" | "risk" | "prices" | "payouts"
+  action      String   // "read" | "create" | "update" | "delete" | "approve" | "reject" | "export"
+  granted     Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([role, resource, action])
+  @@map("permissions")
+}
+
+// ─────────────────────────────────────────────
+// IDEMPOTENCY (Request Deduplication)
+// ─────────────────────────────────────────────
+
+model IdempotencyKey {
+  id         String   @id @default(cuid())
+  key        String   @unique
+  response   String?  // JSON cached response
+  statusCode Int?
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+
+  @@index([expiresAt])
+  @@map("idempotency_keys")
+}
+
+// ─────────────────────────────────────────────
+// BACKGROUND JOBS
+// ─────────────────────────────────────────────
+
+enum JobStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+  RETRYING
+}
+
+model BackgroundJob {
+  id           String    @id @default(cuid())
+  type         String    // "kyc_scan" | "weather_sync" | "price_sync" | "claim_fraud_check" | "payout_process"
+  payload      String?   // JSON
+  status       JobStatus @default(PENDING)
+  attempts     Int       @default(0)
+  maxAttempts  Int       @default(3)
+  lastError    String?
+  result       String?   // JSON
+  scheduledFor DateTime  @default(now())
+  startedAt    DateTime?
+  completedAt  DateTime?
+  createdAt    DateTime  @default(now())
+
+  @@index([status, scheduledFor])
+  @@index([type])
+  @@map("background_jobs")
+}
+
+// ─────────────────────────────────────────────
+// LIVE DATA SYNC TRACKING
+// ─────────────────────────────────────────────
+
+model DataSyncLog {
+  id          String   @id @default(cuid())
+  source      String   // "chirps" | "nasa_power" | "gee" | "ncpb" | "warehouse_iot"
+  sourceType  String   // "weather" | "price" | "warehouse"
+  status      String   // "success" | "partial" | "failed" | "stale"
+  recordCount Int      @default(0)
+  confidence  Float?
+  lastDataAt  DateTime?
+  errorDetail String?
+  durationMs  Int?
+  syncedAt    DateTime @default(now())
+
+  @@index([source, syncedAt])
+  @@index([status])
+  @@map("data_sync_logs")
+}
+
+// ─────────────────────────────────────────────
+// TRANSACTIONS (M-Pesa Integration Tracking)
+// ─────────────────────────────────────────────
+
+enum TransactionType {
+  LOAN_DISBURSEMENT
+  LOAN_REPAYMENT
+  CLAIM_PAYOUT
+  PREMIUM_PAYMENT
+}
+
+enum TransactionStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  REVERSED
+}
+
+model Transaction {
+  id              String            @id @default(cuid())
+  type            TransactionType
+  status          TransactionStatus @default(PENDING)
+  amountKsh       Float
+  phoneNumber     String            // M-Pesa recipient
+  mpesaRef        String?           // M-Pesa transaction reference
+  relatedEntityId String?           // Loan ID, Claim ID, etc.
+  relatedEntityType String?         // "loan", "claim"
+  errorMessage    String?
+  initiatedAt     DateTime          @default(now())
+  completedAt     DateTime?
+
+  @@index([type, status])
+  @@index([mpesaRef])
+  @@index([phoneNumber])
+  @@map("transactions")
+}
+
+// ─────────────────────────────────────────────
+// WORKFLOW INSTANCES (State Machine Persistence)
+// ─────────────────────────────────────────────
+
+model WorkflowInstance {
+  id               String   @id @default(cuid())
+  workflowName     String
+  workflowVersion  Int      @default(1)
+  entityId         String
+  entityType       String
+  currentState     String
+  previousState    String?
+  stateEnteredAt   DateTime @default(now())
+  assignedTo       String?
+  assignedRole     String?
+  priority         Int      @default(0)
+  metadata         String?  // JSON
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  transitions WorkflowTransitionRecord[]
+
+  @@index([workflowName, currentState])
+  @@index([entityId, entityType])
+  @@index([assignedTo])
+  @@index([priority])
+  @@map("workflow_instances")
+}
+
+model WorkflowTransitionRecord {
+  id           String   @id @default(cuid())
+  instanceId   String
+  fromState    String
+  toState      String
+  action       String
+  actorId      String
+  actorRole    String
+  reason       String?
+  guardResults String?  // JSON
+  durationMs   Int?
+  createdAt    DateTime @default(now())
+
+  instance WorkflowInstance @relation(fields: [instanceId], references: [id], onDelete: Cascade)
+
+  @@index([instanceId, createdAt])
+  @@index([actorId])
+  @@map("workflow_transitions")
+}
+
+// ─────────────────────────────────────────────
+// GRAIN LOT TRACEABILITY
+// ─────────────────────────────────────────────
+
+enum GrainLotStatus {
+  INTAKE
+  STORED
+  IN_TRANSIT
+  TRANSFERRED
+  RELEASED
+  WRITTEN_OFF
+}
+
+model GrainLot {
+  id                String         @id @default(cuid())
+  lotCode           String         @unique // e.g. "GL-2025-0001"
+  warehouseId       String
+  warehouseReceiptId String?
+  farmerId          String
+  grainType         String         @default("Maize")
+  quantityKg        Float
+  currentQuantityKg Float
+  grade             GrainGrade     @default(B)
+  status            GrainLotStatus @default(INTAKE)
+  qualityScore      Float?         // 0-100
+  moistureAtIntake  Float?
+  temperatureAtIntake Float?
+
+  originCounty      String?
+  originWard        String?
+  intakeDate        DateTime       @default(now())
+  releaseDate       DateTime?
+
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+
+  movements  GrainLotMovement[]
+  qualityLog GrainLotQualityLog[]
+
+  @@index([warehouseId])
+  @@index([farmerId])
+  @@index([status])
+  @@index([intakeDate])
+  @@map("grain_lots")
+}
+
+model GrainLotMovement {
+  id            String   @id @default(cuid())
+  grainLotId    String
+  movementType  String   // "intake" | "transfer" | "release" | "adjustment" | "write_off"
+  fromLocation  String?
+  toLocation    String?
+  quantityKg    Float
+  reason        String?
+  performedBy   String
+  performedByRole String
+  reference     String?  // Receipt or transfer doc ref
+  createdAt     DateTime @default(now())
+
+  grainLot GrainLot @relation(fields: [grainLotId], references: [id], onDelete: Cascade)
+
+  @@index([grainLotId, createdAt])
+  @@map("grain_lot_movements")
+}
+
+model GrainLotQualityLog {
+  id           String   @id @default(cuid())
+  grainLotId   String
+  qualityScore Float
+  moisturePct  Float?
+  temperatureC Float?
+  humidityPct  Float?
+  inspector    String?
+  notes        String?
+  source       String   @default("manual") // "manual" | "sensor" | "lab"
+  recordedAt   DateTime @default(now())
+
+  grainLot GrainLot @relation(fields: [grainLotId], references: [id], onDelete: Cascade)
+
+  @@index([grainLotId, recordedAt])
+  @@map("grain_lot_quality_logs")
+}
+
+// ─────────────────────────────────────────────
+// FINANCIAL OPERATIONS
+// ─────────────────────────────────────────────
+
+enum PayoutAuthStatus {
+  INITIATED
+  COMPLIANCE_CHECK
+  AUTHORIZATION_PENDING
+  AUTHORIZED
+  PROCESSING
+  COMPLETED
+  FAILED
+  REVERSED
+  BLOCKED
+}
+
+model PayoutRecord {
+  id                String          @id @default(cuid())
+  payoutCode        String          @unique // e.g. "PAY-2025-0001"
+  type              String          // "claim_payout" | "loan_disbursement"
+  status            PayoutAuthStatus @default(INITIATED)
+  amountKsh         Float
+  recipientId       String
+  recipientPhone    String
+  relatedEntityId   String
+  relatedEntityType String          // "claim" | "loan"
+
+  complianceCheckedBy String?
+  complianceCheckedAt DateTime?
+  complianceNotes     String?
+
+  authorizedBy      String?
+  authorizedAt      DateTime?
+  authorizationLevel String?        // "standard" | "elevated" | "executive"
+
+  processingRef     String?         // M-Pesa or bank ref
+  processedAt       DateTime?
+  failureReason     String?
+  retryCount        Int             @default(0)
+
+  reconciledAt      DateTime?
+  reconciliationRef String?
+  reconciliationStatus String?      // "matched" | "unmatched" | "disputed"
+
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  @@index([status])
+  @@index([recipientId])
+  @@index([relatedEntityId, relatedEntityType])
+  @@index([reconciliationStatus])
+  @@map("payout_records")
+}
+
+model ExposureSnapshot {
+  id              String   @id @default(cuid())
+  snapshotDate    DateTime @default(now())
+  totalGrainKg    Float
+  totalValueKsh   Float
+  totalLoansKsh   Float
+  totalClaimsKsh  Float
+  ltvRatio        Float
+  reserveBalanceKsh Float?
+  warehouseCount  Int
+  farmerCount     Int
+  regionBreakdown String?  // JSON
+  createdAt       DateTime @default(now())
+
+  @@index([snapshotDate])
+  @@map("exposure_snapshots")
+}
+
+// ─────────────────────────────────────────────
+// OPERATIONAL EVENTS
+// ─────────────────────────────────────────────
+
+model OperationalEvent {
+  id            String   @id @default(cuid())
+  type          String
+  category      String
+  severity      String   @default("info")
+  title         String
+  description   String?
+  entityId      String?
+  entityType    String?
+  actorId       String?
+  actorRole     String?
+  correlationId String?
+  payload       String?  // JSON
+  acknowledged  Boolean  @default(false)
+  acknowledgedBy String?
+  acknowledgedAt DateTime?
+  resolvedAt    DateTime?
+  createdAt     DateTime @default(now())
+
+  @@index([category, severity])
+  @@index([entityId, entityType])
+  @@index([acknowledged])
+  @@index([createdAt])
+  @@map("operational_events")
+}
+
+// ─────────────────────────────────────────────
+// FRAUD INTELLIGENCE
+// ─────────────────────────────────────────────
+
+model FraudAlert {
+  id              String   @id @default(cuid())
+  alertType       String   // "coordinated_claims" | "collusion" | "registration_burst" | "payout_routing" | "device_fingerprint" | "timing_anomaly"
+  severity        String   @default("medium")
+  confidence      Float
+  entityId        String?
+  entityType      String?
+  description     String
+  indicators      String?  // JSON array of evidence
+  relatedEntities String?  // JSON array of related IDs
+  status          String   @default("open") // "open" | "investigating" | "confirmed" | "dismissed"
+  investigatedBy  String?
+  investigatedAt  DateTime?
+  resolution      String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([alertType, status])
+  @@index([severity])
+  @@index([entityId])
+  @@index([createdAt])
+  @@map("fraud_alerts")
+}
+
+// ─────────────────────────────────────────────
+// RESILIENCE & RECOVERY
+// ─────────────────────────────────────────────
+
+enum RetryStatus {
+  PENDING
+  IN_PROGRESS
+  SUCCEEDED
+  FAILED_PERMANENT
+  DEAD_LETTERED
+}
+
+model RetryQueue {
+  id            String      @id @default(cuid())
+  operationType String      // "payout" | "notification" | "sync" | "webhook"
+  status        RetryStatus @default(PENDING)
+  payload       String      // JSON
+  attempts      Int         @default(0)
+  maxAttempts   Int         @default(5)
+  lastError     String?
+  nextRetryAt   DateTime
+  backoffMs     Int         @default(1000)
+  idempotencyKey String?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  @@index([status, nextRetryAt])
+  @@index([operationType])
+  @@index([idempotencyKey])
+  @@map("retry_queue")
+}

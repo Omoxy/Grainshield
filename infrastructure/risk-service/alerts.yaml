@@ -1,0 +1,28 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: risk-service-alerts
+  namespace: grainshield-prod
+spec:
+  groups:
+  - name: risk-service-auto-rollback
+    rules:
+    - alert: RiskServiceHighErrorRate
+      expr: sum(rate(http_requests_total{app="risk-service", status=~"5.."}[5m])) / sum(rate(http_requests_total{app="risk-service"}[5m])) > 0.01
+      for: 2m
+      labels:
+        severity: critical
+        action: auto-rollback
+    - alert: RiskServiceHighLatency
+      expr: histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{app="risk-service"}[5m])) by (le)) > (2 * 0.200)
+      for: 2m
+      labels:
+        severity: critical
+        action: auto-rollback
+  - name: risk-service-tls
+    rules:
+    - alert: TLSCertExpirySoon
+      expr: probe_ssl_earliest_cert_expiry{job="blackbox", service="risk-service"} - time() < 7 * 86400
+      for: 1h
+      labels:
+        severity: warning

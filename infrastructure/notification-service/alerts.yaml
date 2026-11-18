@@ -1,0 +1,44 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: notification-service-alerts
+  namespace: grainshield-prod
+  labels:
+    app: notification-service
+spec:
+  groups:
+  - name: notification-service-auto-rollback
+    rules:
+    # Auto-rollback trigger 1: HTTP error rate exceeds 1% during canary deployments
+    - alert: NotificationServiceHighErrorRate
+      expr: sum(rate(http_requests_total{app="notification-service", status=~"5.."}[5m])) / sum(rate(http_requests_total{app="notification-service"}[5m])) > 0.01
+      for: 2m
+      labels:
+        severity: critical
+        action: auto-rollback
+      annotations:
+        summary: "Error rate > 1% triggering auto-rollback"
+        description: "Notification service is exceeding the 1% error rate threshold. ArgoCD/Flux GitOps roll-back triggered."
+
+    # Auto-rollback trigger 2: p95 latency > 2x SLO
+    - alert: NotificationServiceHighLatency
+      expr: histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{app="notification-service"}[5m])) by (le)) > (2 * 0.200) # Baseline 200ms
+      for: 2m
+      labels:
+        severity: critical
+        action: auto-rollback
+      annotations:
+        summary: "p95 latency > 2x SLO baseline"
+        description: "Notification service p95 latency > 400ms. Triggering auto-rollback procedure."
+
+  - name: notification-service-tls
+    rules:
+    # Rule: All TLS certificates valid > 30 days. Alert at 7 days.
+    - alert: TLSCertExpirySoon
+      expr: probe_ssl_earliest_cert_expiry{job="blackbox", service="notification-service"} - time() < 7 * 86400
+      for: 1h
+      labels:
+        severity: warning
+      annotations:
+        summary: "TLS certificate valid for less than 7 days"
+        description: "cert-manager auto-renew failed for notification-service TLS certs. Intervene manually."

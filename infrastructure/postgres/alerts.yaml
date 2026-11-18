@@ -1,0 +1,24 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: postgres-alerts
+  namespace: grainshield-prod
+spec:
+  groups:
+  - name: postgres-availability
+    rules:
+    - alert: PostgresHighErrorRate
+      expr: sum(rate(pg_stat_database_xact_rollback{datname="grainshield"}[5m])) / sum(rate(pg_stat_database_xact_commit{datname="grainshield"}[5m])) > 0.01
+      for: 2m
+      labels:
+        severity: critical
+        action: auto-rollback
+      annotations:
+        summary: "Database Error rate > 1%"
+    - alert: PostgresHighLatency
+      expr: histogram_quantile(0.95, sum(rate(pg_query_duration_seconds_bucket[5m])) by (le)) > (2 * 0.050)
+      for: 2m
+      labels:
+        severity: critical
+      annotations:
+        summary: "p95 DB latency > 2x SLO baseline"

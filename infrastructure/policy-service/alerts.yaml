@@ -1,0 +1,44 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: policy-service-alerts
+  namespace: grainshield-prod
+  labels:
+    app: policy-service
+spec:
+  groups:
+  - name: policy-service-auto-rollback
+    rules:
+    # Rule: Auto-rollback trigger if error rate > 1%
+    - alert: PolicyServiceHighErrorRate
+      expr: sum(rate(http_requests_total{app="policy-service", status=~"5.."}[5m])) / sum(rate(http_requests_total{app="policy-service"}[5m])) > 0.01
+      for: 2m
+      labels:
+        severity: critical
+        action: auto-rollback
+      annotations:
+        summary: "Error rate > 1% triggering auto-rollback"
+        description: "Policy service is seeing more than 1% HTTP 5xx errors over a 5 minute period. Triggering GitOps rollback."
+
+    # Rule: Auto-rollback trigger if p95 latency > 2x SLO baseline
+    - alert: PolicyServiceHighLatency
+      expr: histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{app="policy-service"}[5m])) by (le)) > (2 * 0.200) # Assuming 200ms SLO
+      for: 2m
+      labels:
+        severity: critical
+        action: auto-rollback
+      annotations:
+        summary: "p95 latency > 2x SLO baseline"
+        description: "Policy service p95 latency is exceeding 400ms. Triggering GitOps rollback."
+
+  - name: policy-service-tls
+    rules:
+    # Rule: All TLS certificates valid > 30 days. Alert at 7 days.
+    - alert: TLSCertExpirySoon
+      expr: probe_ssl_earliest_cert_expiry{job="blackbox", service="policy-service"} - time() < 7 * 86400
+      for: 1h
+      labels:
+        severity: warning
+      annotations:
+        summary: "TLS certificate valid for less than 7 days"
+        description: "Auto-renew via cert-manager may have failed. Intervene manually to avoid outage."

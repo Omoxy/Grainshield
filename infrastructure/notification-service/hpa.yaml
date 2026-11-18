@@ -1,0 +1,34 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: notification-service-hpa
+  namespace: grainshield-prod
+  labels:
+    app: notification-service
+spec:
+  scaleTargetRef:
+    apiVersion: argoproj.io/v1alpha1
+    kind: Rollout
+    name: notification-service
+  # Matching the t3.medium services node pool constraints: 6-20 auto-scale
+  minReplicas: 6
+  maxReplicas: 20
+  metrics:
+  # First trigger: CPU Utilization
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  # Second trigger: Event backlog for SMS generation
+  - type: External
+    external:
+      metric:
+        name: kafka_consumergroup_lag
+        selector:
+          matchLabels:
+            topic: notification-events
+      target:
+        type: Value
+        value: 1000

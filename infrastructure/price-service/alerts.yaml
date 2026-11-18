@@ -1,0 +1,32 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: price-service-alerts
+  namespace: grainshield-prod
+spec:
+  groups:
+  - name: price-service-auto-rollback
+    rules:
+    - alert: PriceServiceHighErrorRate
+      expr: sum(rate(http_requests_total{app="price-service", status=~"5.."}[5m])) / sum(rate(http_requests_total{app="price-service"}[5m])) > 0.01
+      for: 2m
+      labels:
+        severity: critical
+        action: auto-rollback
+      annotations:
+        summary: "Error rate > 1% triggering auto-rollback"
+    - alert: PriceServiceHighLatency
+      expr: histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{app="price-service"}[5m])) by (le)) > (2 * 0.200)
+      for: 2m
+      labels:
+        severity: critical
+        action: auto-rollback
+      annotations:
+        summary: "p95 latency > 2x SLO baseline"
+  - name: price-service-tls
+    rules:
+    - alert: TLSCertExpirySoon
+      expr: probe_ssl_earliest_cert_expiry{job="blackbox", service="price-service"} - time() < 7 * 86400
+      for: 1h
+      labels:
+        severity: warning

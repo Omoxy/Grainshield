@@ -1,0 +1,123 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: notification-service
+  namespace: grainshield-prod
+  labels:
+    app: notification-service
+    tier: backend
+    region: af-south-1
+spec:
+  # Base replicas set to 6 as per the services node pool rules (6-20 auto-scale)
+  replicas: 6
+  selector:
+    matchLabels:
+      app: notification-service
+  strategy:
+    canary:
+      steps:
+      - setWeight: 10
+      - pause: {duration: 30m}
+      - setWeight: 50
+      - pause: {duration: 30m}
+  template:
+    metadata:
+      labels:
+        app: notification-service
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8086"
+    spec:
+      # Target the specific t3.medium app node-pool
+      nodeSelector:
+        node-pool: services  
+      containers:
+      - name: notification-service
+        image: grainshield/notification-service:v1.0.0
+        ports:
+        - containerPort: 8086
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "256Mi"
+          limits:
+            cpu: "1000m"
+            memory: "512Mi"
+        envFrom:
+        # SOC 2 & Security context: Mount secrets securely via sealed-secrets
+        - secretRef:
+            name: notification-service-sealed-secrets
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8086
+          initialDelaySeconds: 15
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8086
+          initialDelaySeconds: 5
+          periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: notification-service
+  namespace: grainshield-prod
+  labels:
+    app: notification-service
+spec:
+  selector:
+    app: notification-service
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 8086
+
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: notification-service-ingress
+  namespace: grainshield-prod
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  ingressClassName: nginx
+  tls:
+  - hosts:
+    - notification-service.gs-prod.com
+    secretName: notification-service-tls-secret
+  rules:
+  - host: notification-service.gs-prod.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: notification-service
+            port:
+              number: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: notification-service-soc2-access-control
+  namespace: grainshield-prod
+spec:
+  podSelector:
+    matchLabels:
+      app: notification-service
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ingress-nginx
+    ports:
+    - protocol: TCP
+      port: 80

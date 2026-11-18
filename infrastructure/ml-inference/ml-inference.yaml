@@ -1,0 +1,129 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: ml-inference
+  namespace: grainshield-prod
+  labels:
+    app: ml-inference
+    tier: ai
+    region: af-south-1
+spec:
+  # Explicitly fixed at 2 replicas as specified in the node pool layout rules
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ml-inference
+  strategy:
+    canary:
+      steps:
+      - setWeight: 10
+      - pause: {duration: 30m}
+      - setWeight: 50
+      - pause: {duration: 30m}
+  template:
+    metadata:
+      labels:
+        app: ml-inference
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "5000"
+    spec:
+      # Target strict ML instances
+      nodeSelector:
+        node-pool: ml-inference  # g4dn.xlarge
+      # Required toleration for the tainted ML nodes
+      tolerations:
+      - key: "nvidia.com/gpu"
+        operator: "Exists"
+        effect: "NoSchedule"
+      containers:
+      - name: ml-inference
+        image: grainshield/ml-inference:v1.0.0
+        ports:
+        - containerPort: 5000
+        resources:
+          requests:
+            cpu: "2000m"
+            memory: "4Gi"
+            nvidia.com/gpu: 1
+          limits:
+            cpu: "4000m"
+            memory: "8Gi"
+            nvidia.com/gpu: 1
+        envFrom:
+        - secretRef:
+            name: ml-inference-sealed-secrets
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 5000
+          initialDelaySeconds: 60
+          periodSeconds: 20
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 5000
+          initialDelaySeconds: 30
+          periodSeconds: 15
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ml-inference
+  namespace: grainshield-prod
+  labels:
+    app: ml-inference
+spec:
+  selector:
+    app: ml-inference
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 5000
+
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ml-inference-ingress
+  namespace: grainshield-prod
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  ingressClassName: nginx
+  tls:
+  - hosts:
+    - ml-inference.gs-prod.com
+    secretName: ml-inference-tls-secret
+  rules:
+  - host: ml-inference.gs-prod.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: ml-inference
+            port:
+              number: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ml-inference-soc2-access-control
+  namespace: grainshield-prod
+spec:
+  podSelector:
+    matchLabels:
+      app: ml-inference
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ingress-nginx
+    ports:
+    - protocol: TCP
+      port: 5000

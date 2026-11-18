@@ -1,0 +1,11 @@
+# Gitleaks configuration for GrainShield
+title = "GrainShield Gitleaks Configuration"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Allowlist documented example placeholders in .env.example only"
+paths = [
+  '''(?i)^\.env\.example$''',
+]

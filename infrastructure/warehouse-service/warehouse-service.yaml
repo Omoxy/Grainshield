@@ -1,0 +1,120 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: warehouse-service
+  namespace: grainshield-prod
+  labels:
+    app: warehouse-service
+    tier: backend
+    region: af-south-1
+spec:
+  replicas: 6
+  selector:
+    matchLabels:
+      app: warehouse-service
+  strategy:
+    canary:
+      steps:
+      - setWeight: 10
+      - pause: {duration: 30m}
+      - setWeight: 50
+      - pause: {duration: 30m}
+  template:
+    metadata:
+      labels:
+        app: warehouse-service
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8085"
+    spec:
+      nodeSelector:
+        node-pool: services
+      containers:
+      - name: warehouse-service
+        image: grainshield/warehouse-service:v1.0.0
+        ports:
+        - containerPort: 8085
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "256Mi"
+          limits:
+            cpu: "1000m"
+            memory: "512Mi"
+        envFrom:
+        - secretRef:
+            name: warehouse-service-sealed-secrets
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8085
+          initialDelaySeconds: 15
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8085
+          initialDelaySeconds: 5
+          periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: warehouse-service
+  namespace: grainshield-prod
+  labels:
+    app: warehouse-service
+spec:
+  selector:
+    app: warehouse-service
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 8085
+
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: warehouse-service-ingress
+  namespace: grainshield-prod
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  ingressClassName: nginx
+  tls:
+  - hosts:
+    - warehouse-service.gs-prod.com
+    secretName: warehouse-service-tls-secret
+  rules:
+  - host: warehouse-service.gs-prod.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: warehouse-service
+            port:
+              number: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: warehouse-service-soc2-access-control
+  namespace: grainshield-prod
+spec:
+  podSelector:
+    matchLabels:
+      app: warehouse-service
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ingress-nginx
+    ports:
+    - protocol: TCP
+      port: 80

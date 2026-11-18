@@ -1,0 +1,79 @@
+# ─── Environment & Secrets ────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*-credentials.json
+*-service-account.json
+
+# ─── Node.js ──────────────────────────────────────────────────────────────────
+node_modules/
+.next/
+out/
+.turbo/
+*.tsbuildinfo
+
+# ─── Go ───────────────────────────────────────────────────────────────────────
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+__debug_bin*
+vendor/
+
+# ─── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# ─── Databases & Data ────────────────────────────────────────────────────────
+*.db
+*.sqlite
+*.sqlite3
+postgres_data/
+redis_data/
+*.csv
+*.xlsx
+*.parquet
+
+# ─── Logs ─────────────────────────────────────────────────────────────────────
+*.log
+logs/
+
+# ─── Build & Coverage ────────────────────────────────────────────────────────
+coverage/
+*.cover
+*.out
+htmlcov/
+
+# ─── Docker ───────────────────────────────────────────────────────────────────
+*.tar
+docker-compose.override.yml
+
+# ─── IDE & Editor ─────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ─── Agent & AI Artifacts ─────────────────────────────────────────────────────
+.gemini/
+.antigravity/
+.cursor/
+.codex/
+
+# ─── OS Junk ──────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+Desktop.ini
+ehthumbs.db

@@ -1,0 +1,28 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: warehouse-service-alerts
+  namespace: grainshield-prod
+spec:
+  groups:
+  - name: warehouse-service-auto-rollback
+    rules:
+    - alert: WarehouseServiceHighErrorRate
+      expr: sum(rate(http_requests_total{app="warehouse-service", status=~"5.."}[5m])) / sum(rate(http_requests_total{app="warehouse-service"}[5m])) > 0.01
+      for: 2m
+      labels:
+        severity: critical
+        action: auto-rollback
+    - alert: WarehouseServiceHighLatency
+      expr: histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{app="warehouse-service"}[5m])) by (le)) > (2 * 0.200)
+      for: 2m
+      labels:
+        severity: critical
+        action: auto-rollback
+  - name: warehouse-service-tls
+    rules:
+    - alert: TLSCertExpirySoon
+      expr: probe_ssl_earliest_cert_expiry{job="blackbox", service="warehouse-service"} - time() < 7 * 86400
+      for: 1h
+      labels:
+        severity: warning

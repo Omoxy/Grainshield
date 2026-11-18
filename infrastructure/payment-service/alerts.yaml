@@ -1,0 +1,32 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: payment-service-alerts
+  namespace: grainshield-prod
+spec:
+  groups:
+  - name: payment-service-auto-rollback
+    rules:
+    - alert: PaymentServiceHighErrorRate
+      expr: sum(rate(http_requests_total{app="payment-service", status=~"5.."}[5m])) / sum(rate(http_requests_total{app="payment-service"}[5m])) > 0.01
+      for: 2m
+      labels:
+        severity: critical
+        action: auto-rollback
+      annotations:
+        summary: "Error rate > 1% triggering auto-rollback"
+    - alert: PaymentServiceHighLatency
+      expr: histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{app="payment-service"}[5m])) by (le)) > (2 * 0.200)
+      for: 2m
+      labels:
+        severity: critical
+        action: auto-rollback
+      annotations:
+        summary: "p95 latency > 2x SLO baseline"
+  - name: payment-service-tls
+    rules:
+    - alert: TLSCertExpirySoon
+      expr: probe_ssl_earliest_cert_expiry{job="blackbox", service="payment-service"} - time() < 7 * 86400
+      for: 1h
+      labels:
+        severity: warning
